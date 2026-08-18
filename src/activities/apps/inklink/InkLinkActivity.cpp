@@ -6,8 +6,12 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <string.h>
 
+#include "NetworkStartup.h"
+#include "WifiCredentialStore.h"
+#include "activities/network/WifiSelectionActivity.h"
 #include "fontIds.h"
 
 // ---- CRC32 (table-based, self-contained) -----------------------------------
@@ -52,11 +56,7 @@ InkLinkActivity::InkLinkActivity(GfxRenderer& renderer, MappedInputManager& mapp
 }
 
 InkLinkActivity::~InkLinkActivity() {
-  if (wsServer_) {
-    wsServer_->close();
-    delete wsServer_;
-    wsServer_ = nullptr;
-  }
+  teardownWifi();
   sInstance = nullptr;
 }
 
@@ -67,35 +67,56 @@ void InkLinkActivity::onEnter() {
   Storage.mkdir(inklink::SLOT_DIR, true);
   snprintf(tmpPath_, sizeof(tmpPath_), "%s/_incoming.tmp", inklink::SLOT_DIR);
 
-  if (!wsServer_) {
-    wsServer_ = new WebSocketsServer(inklink::WS_PORT);
-    wsServer_->begin();
-    wsServer_->onEvent(InkLinkActivity::onWsEvent);
-    serverStarted_ = true;
-    LOG_INF("InkLink", "WS server started on :%u", inklink::WS_PORT);
-  }
-
   state_ = State::Idle;
   needsRedraw_ = true;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiState_ = WifiState::Connected;
+    startWsServer();
+  } else {
+    if (startSavedWifiAssociation()) {
+      wifiState_ = WifiState::Connecting;
+      wifiConnectStartMs_ = millis();
+    } else {
+      wifiState_ = WifiState::Disconnected;
+      openWifiSelection();
+    }
+  }
+
   requestUpdate();
 }
 
 void InkLinkActivity::onExit() {
-  if (wsServer_) {
-    wsServer_->close();
-    delete wsServer_;
-    wsServer_ = nullptr;
-    serverStarted_ = false;
-  }
+  teardownWifi();
   Activity::onExit();
 }
 
 void InkLinkActivity::loop() {
+  if (wifiState_ == WifiState::Connecting) {
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiState_ = WifiState::Connected;
+      startWsServer();
+      needsRedraw_ = true;
+      requestUpdate();
+    } else if (millis() - wifiConnectStartMs_ > 15000) {
+      wifiState_ = WifiState::Failed;
+      needsRedraw_ = true;
+      requestUpdate();
+    }
+  }
+
   if (wsServer_) wsServer_->loop();
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     finish();
     return;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (wifiState_ != WifiState::Connected) {
+      openWifiSelection();
+      return;
+    }
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Left) ||
@@ -128,6 +149,84 @@ void InkLinkActivity::render(RenderLock&&) {
   drawStatusScreen();
 }
 
+// ---- WiFi & Server management ----------------------------------------------
+
+bool InkLinkActivity::startSavedWifiAssociation() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+
+  if (WIFI_STORE.getCredentialCount() == 0) WIFI_STORE.loadFromFile();
+  const std::string lastSsid = WIFI_STORE.getLastConnectedSsid();
+  if (lastSsid.empty()) return false;
+
+  const auto credential = WIFI_STORE.findCredential(lastSsid);
+  if (!credential) return false;
+
+  WiFi.persistent(false);
+  NetworkStartup::setMode(renderer, WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(50);
+  if (credential->password.empty()) {
+    WiFi.begin(credential->ssid.c_str());
+  } else {
+    WiFi.begin(credential->ssid.c_str(), credential->password.c_str());
+  }
+  broughtWifiUp_ = true;
+  return true;
+}
+
+void InkLinkActivity::openWifiSelection() {
+  if (!startActivityForResultWith<WifiSelectionActivity>([this](const ActivityResult& result) {
+        handleWifiResult(result);
+      })) {
+    wifiState_ = WifiState::Failed;
+    needsRedraw_ = true;
+    requestUpdate();
+  }
+}
+
+void InkLinkActivity::handleWifiResult(const ActivityResult& result) {
+  if (!result.isCancelled && WiFi.status() == WL_CONNECTED) {
+    wifiState_ = WifiState::Connected;
+    broughtWifiUp_ = true;
+    startWsServer();
+  } else {
+    wifiState_ = WifiState::Failed;
+  }
+  needsRedraw_ = true;
+  requestUpdate();
+}
+
+void InkLinkActivity::startWsServer() {
+  if (!wsServer_) {
+    wsServer_ = new WebSocketsServer(inklink::WS_PORT);
+    wsServer_->begin();
+    wsServer_->onEvent(InkLinkActivity::onWsEvent);
+    serverStarted_ = true;
+    LOG_INF("InkLink", "WS server started on :%u, IP: %s",
+            inklink::WS_PORT, WiFi.localIP().toString().c_str());
+  }
+}
+
+void InkLinkActivity::stopWsServer() {
+  if (wsServer_) {
+    wsServer_->close();
+    delete wsServer_;
+    wsServer_ = nullptr;
+    serverStarted_ = false;
+  }
+}
+
+void InkLinkActivity::teardownWifi() {
+  stopWsServer();
+  if (broughtWifiUp_) {
+    WiFi.disconnect(false);
+    delay(50);
+    WiFi.mode(WIFI_OFF);
+    esp_wifi_deinit();
+    broughtWifiUp_ = false;
+  }
+}
+
 // ---- WS trampoline ---------------------------------------------------------
 
 void InkLinkActivity::onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
@@ -157,7 +256,7 @@ void InkLinkActivity::handleWsText(uint8_t num, const uint8_t* payload, size_t l
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload, length);
   if (err) {
-    wsServer_->sendTXT(num, "{\"error\":\"bad_json\"}");
+    if (wsServer_) wsServer_->sendTXT(num, "{\"error\":\"bad_json\"}");
     return;
   }
 
@@ -166,12 +265,12 @@ void InkLinkActivity::handleWsText(uint8_t num, const uint8_t* payload, size_t l
   uint32_t crcExpected = doc["crc32"] | 0u;
 
   if (size != static_cast<uint32_t>(inklink::FRAME_BYTES)) {
-    wsServer_->sendTXT(num, "{\"error\":\"bad_size\"}");
+    if (wsServer_) wsServer_->sendTXT(num, "{\"error\":\"bad_size\"}");
     return;
   }
 
   startReceiving(num, slot, size, crcExpected);
-  wsServer_->sendTXT(num, "{\"ok\":\"ready\"}");
+  if (wsServer_) wsServer_->sendTXT(num, "{\"ok\":\"ready\"}");
 }
 
 void InkLinkActivity::handleWsBinary(uint8_t num, const uint8_t* payload, size_t length) {
@@ -180,7 +279,7 @@ void InkLinkActivity::handleWsBinary(uint8_t num, const uint8_t* payload, size_t
   HalFile f = Storage.open(tmpPath_, O_WRONLY | O_CREAT | O_APPEND);
   if (!f) {
     abortReceiving();
-    wsServer_->sendTXT(num, "{\"error\":\"sd_write\"}");
+    if (wsServer_) wsServer_->sendTXT(num, "{\"error\":\"sd_write\"}");
     return;
   }
   f.write(payload, length);
@@ -223,7 +322,7 @@ void InkLinkActivity::finishReceiving() {
   uint32_t actual = crc32File(tmpPath_);
   if (pendingCrc_ != 0 && actual != pendingCrc_) {
     LOG_ERR("InkLink", "CRC mismatch: got=%08X want=%08X", actual, pendingCrc_);
-    wsServer_->sendTXT(activeClient_, "{\"error\":\"crc_mismatch\"}");
+    if (wsServer_) wsServer_->sendTXT(activeClient_, "{\"error\":\"crc_mismatch\"}");
     Storage.remove(tmpPath_);
     return;
   }
@@ -237,7 +336,7 @@ void InkLinkActivity::finishReceiving() {
   displayFrameFromFile(slotPath_);
   state_ = State::Idle;
 
-  wsServer_->sendTXT(activeClient_, "{\"ok\":\"displayed\"}");
+  if (wsServer_) wsServer_->sendTXT(activeClient_, "{\"ok\":\"displayed\"}");
   activeClient_ = 0xFF;
 
   // Track current slot
@@ -257,10 +356,6 @@ void InkLinkActivity::abortReceiving() {
 }
 
 // ---- Frame display ---------------------------------------------------------
-// File layout (written by RetroDisplayRenderer.swift on Mac):
-//   [0 .. BUFFER_SIZE-1]          = MSB plane (bit 1 of each pixel's 2-bit gray)
-//   [BUFFER_SIZE .. 2*BUFFER_SIZE-1] = LSB plane (bit 0)
-// BUFFER_SIZE = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT = 66 * 792 = 52272 bytes
 
 void InkLinkActivity::displayFrameFromFile(const char* path) {
   const uint32_t planeSize = HalDisplay::BUFFER_SIZE;
@@ -288,7 +383,6 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   // --- LSB pass ---
   renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
   f.seek(planeSize);
-  // Read LSB plane into frameBuffer
   int lsbRead = f.read(fb, planeSize);
   if (lsbRead != static_cast<int>(planeSize)) {
     LOG_ERR("InkLink", "Short read LSB: %d/%u", lsbRead, planeSize);
@@ -315,6 +409,7 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   // --- Trigger EPD refresh ---
   renderer.setRenderMode(GfxRenderer::BW);
   renderer.displayGrayBuffer();
+  renderer.cleanupGrayscaleWithFrameBuffer();
 
   LOG_INF("InkLink", "Frame displayed: %s", path);
 }
@@ -347,17 +442,31 @@ void InkLinkActivity::drawStatusScreen() {
   const int cy = sh / 2;
 
   // Title
-  renderer.drawCenteredText(UI_12_FONT_ID, cy - 40, "InkLink", true, EpdFontFamily::BOLD);
+  renderer.drawCenteredText(UI_12_FONT_ID, cy - 50, "InkLink", true, EpdFontFamily::BOLD);
 
-  // WebSocket URL
-  char wsUrl[64];
-  snprintf(wsUrl, sizeof(wsUrl), "ws://%s:%u",
-           WiFi.localIP().toString().c_str(), inklink::WS_PORT);
-  renderer.drawCenteredText(UI_12_FONT_ID, cy, wsUrl, true);
+  if (wifiState_ == WifiState::Connected) {
+    // WebSocket URL
+    char wsUrl[64];
+    snprintf(wsUrl, sizeof(wsUrl), "ws://%s:%u",
+             WiFi.localIP().toString().c_str(), inklink::WS_PORT);
+    renderer.drawCenteredText(UI_12_FONT_ID, cy - 10, wsUrl, true);
 
-  // Hint
-  renderer.drawCenteredText(UI_10_FONT_ID, cy + 30,
-                            "Waiting for ink-Macintosh...", true);
+    // Current slot & hint
+    char slotHint[64];
+    const char* slotName = (currentSlot_ >= 0 && currentSlot_ < inklink::SLOT_COUNT)
+                               ? inklink::SLOT_NAMES[currentSlot_]
+                               : inklink::SLOT_NAMES[0];
+    snprintf(slotHint, sizeof(slotHint), "Slot: %s  (< / > to switch)", slotName);
+    renderer.drawCenteredText(UI_10_FONT_ID, cy + 20, slotHint, true);
+
+    renderer.drawCenteredText(UI_10_FONT_ID, cy + 50,
+                              "Waiting for ink-Macintosh...", true);
+  } else if (wifiState_ == WifiState::Connecting) {
+    renderer.drawCenteredText(UI_12_FONT_ID, cy, "Connecting to WiFi...", true);
+  } else {
+    renderer.drawCenteredText(UI_12_FONT_ID, cy - 10, "WiFi Disconnected", true);
+    renderer.drawCenteredText(UI_10_FONT_ID, cy + 20, "Press Confirm to Select WiFi", true);
+  }
 
   renderer.displayBuffer(HalDisplay::FULL_REFRESH);
 }

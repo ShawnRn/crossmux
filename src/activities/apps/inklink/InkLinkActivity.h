@@ -40,6 +40,13 @@ class InkLinkActivity final : public Activity {
     SlotLoading,
   };
 
+  enum class WifiState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Failed,
+  };
+
   static void onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
   static InkLinkActivity* sInstance;
 
@@ -54,8 +61,18 @@ class InkLinkActivity final : public Activity {
   void loadSlotByIndex(int index);
   void drawStatusScreen();
 
+  bool startSavedWifiAssociation();
+  void openWifiSelection();
+  void handleWifiResult(const ActivityResult& result);
+  void startWsServer();
+  void stopWsServer();
+  void teardownWifi();
+
   WebSocketsServer* wsServer_ = nullptr;
   State state_ = State::Idle;
+  WifiState wifiState_ = WifiState::Disconnected;
+  bool broughtWifiUp_ = false;
+  uint32_t wifiConnectStartMs_ = 0;
 
   uint8_t  activeClient_  = 0xFF;
   char     pendingSlot_[32] = {};
