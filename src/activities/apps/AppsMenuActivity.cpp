@@ -36,7 +36,8 @@ enum class AppId : uint8_t {
   OpdsBrowser = 14,
   Calculator = 15,
   Woodfish = 16,
-  Count = 17,
+  InkLink = 17,
+  Count = 18,
 };
 
 struct AppEntry {
@@ -68,6 +69,7 @@ constexpr AppEntry kAppEntries[] = {
     {AppId::Calculator, StrId::STR_CALCULATOR_TITLE, UIIcon::Calculator, &ActivityManager::goToCalculator},
     {AppId::Woodfish, StrId::STR_WOODFISH_TITLE, UIIcon::Woodfish, &ActivityManager::goToWoodfish},
     {AppId::Standby, StrId::STR_STANDBY_TITLE, UIIcon::Standby, &ActivityManager::goToStandby},
+    {AppId::InkLink, StrId::STR_INKLINK_TITLE, UIIcon::InkLink, &ActivityManager::goToInkLink},
 };
 
 constexpr int kAppCount = static_cast<int>(sizeof(kAppEntries) / sizeof(kAppEntries[0]));

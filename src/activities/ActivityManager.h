@@ -126,6 +126,7 @@ class ActivityManager {
   void goToWoodfish();
   void goToAirPage();
   void goToBuddy();
+  void goToInkLink();
   void goToStandby();
   void goToGame2048();
 #ifdef ENABLE_CHINESE_VERSION

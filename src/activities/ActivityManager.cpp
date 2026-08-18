@@ -12,6 +12,7 @@
 #include "apps/airpage/AirPageActivity.h"
 #include "apps/avatar/UglyAvatarActivity.h"
 #include "apps/buddy/BuddyActivity.h"
+#include "apps/inklink/InkLinkActivity.h"
 #include "apps/calculator/CalculatorActivity.h"
 #include "apps/sokoban/SokobanGameActivity.h"
 #ifdef ENABLE_CHINESE_VERSION
@@ -425,6 +426,8 @@ void ActivityManager::goToGame2048() { replaceActivityWith<Game2048Activity>(); 
 void ActivityManager::goToAirPage() { replaceActivityWith<AirPageActivity>(); }
 
 void ActivityManager::goToBuddy() { replaceActivityWith<BuddyActivity>(); }
+
+void ActivityManager::goToInkLink() { replaceActivityWith<InkLinkActivity>(); }
 
 void ActivityManager::goToStandby() { replaceActivityWith<StandbyActivity>(); }
 

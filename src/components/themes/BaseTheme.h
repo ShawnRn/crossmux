@@ -151,6 +151,7 @@ enum UIIcon {
   Achievements,
   Calculator,
   Woodfish,
+  InkLink,
 };
 
 // Default theme implementation (Classic Theme)

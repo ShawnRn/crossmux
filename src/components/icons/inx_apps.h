@@ -314,6 +314,8 @@ constexpr const uint8_t* get(const UIIcon icon) {
       return Calculator.data();
     case UIIcon::Woodfish:
       return Woodfish.data();
+    case UIIcon::InkLink:
+      return Transfer.data();
     default:
       return nullptr;
   }

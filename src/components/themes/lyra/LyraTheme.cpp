@@ -98,6 +98,7 @@ const uint8_t* LyraTheme::iconForName(UIIcon icon, int size) {
         return LibraryIcon;
       case UIIcon::Wifi:
       case UIIcon::AirPage:
+      case UIIcon::InkLink:
         return WifiIcon;
       case UIIcon::Hotspot:
         return HotspotIcon;
