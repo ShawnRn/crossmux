@@ -7,6 +7,8 @@
 #include <WiFi.h>
 #include <string.h>
 
+#include "fontIds.h"
+
 // ---- CRC32 (table-based, self-contained) -----------------------------------
 
 static uint32_t crc32Table[256];
@@ -42,7 +44,10 @@ InkLinkActivity* InkLinkActivity::sInstance = nullptr;
 
 // ---- Construction / destruction --------------------------------------------
 
-InkLinkActivity::InkLinkActivity() { sInstance = this; }
+InkLinkActivity::InkLinkActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+    : Activity("InkLink", renderer, mappedInput) {
+  sInstance = this;
+}
 
 InkLinkActivity::~InkLinkActivity() {
   if (wsServer_) {
@@ -55,7 +60,8 @@ InkLinkActivity::~InkLinkActivity() {
 
 // ---- Lifecycle -------------------------------------------------------------
 
-void InkLinkActivity::onEnter(GfxRenderer& renderer, const ActivityContext& /*ctx*/) {
+void InkLinkActivity::onEnter() {
+  Activity::onEnter();
   HalStorage::mkdirp(inklink::SLOT_DIR);
   snprintf(tmpPath_, sizeof(tmpPath_), "%s/_incoming.tmp", inklink::SLOT_DIR);
 
@@ -69,49 +75,55 @@ void InkLinkActivity::onEnter(GfxRenderer& renderer, const ActivityContext& /*ct
 
   state_ = State::Idle;
   needsRedraw_ = true;
+  requestUpdate();
 }
 
-void InkLinkActivity::onExit(GfxRenderer& /*renderer*/) {
+void InkLinkActivity::onExit() {
   if (wsServer_) {
     wsServer_->close();
     delete wsServer_;
     wsServer_ = nullptr;
     serverStarted_ = false;
   }
+  Activity::onExit();
 }
 
-void InkLinkActivity::loop(GfxRenderer& renderer, const InputEvent& input) {
+void InkLinkActivity::loop() {
   if (wsServer_) wsServer_->loop();
 
-  // Physical button: cycle named slots (Left = previous, Right = next)
-  if (input.type == InputEvent::Type::ButtonPress) {
-    if (input.button == InputEvent::Button::Left) {
-      loadSlotByIndex(renderer, (currentSlot_ - 1 + inklink::SLOT_COUNT) % inklink::SLOT_COUNT);
-    } else if (input.button == InputEvent::Button::Right) {
-      loadSlotByIndex(renderer, (currentSlot_ + 1) % inklink::SLOT_COUNT);
-    }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    finish();
+    return;
   }
 
-  // Transition: binary reception complete → verify
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left) ||
+      mappedInput.wasReleased(MappedInputManager::Button::ScreenLeft)) {
+    loadSlotByIndex((currentSlot_ - 1 + inklink::SLOT_COUNT) % inklink::SLOT_COUNT);
+  } else if (mappedInput.wasReleased(MappedInputManager::Button::Right) ||
+             mappedInput.wasReleased(MappedInputManager::Button::ScreenRight)) {
+    loadSlotByIndex((currentSlot_ + 1) % inklink::SLOT_COUNT);
+  }
+
+  // Transition: binary reception complete -> verify
   if (state_ == State::Verifying) {
-    finishReceiving(renderer);
+    finishReceiving();
   }
 }
 
-void InkLinkActivity::render(GfxRenderer& renderer) {
+void InkLinkActivity::render(RenderLock&&) {
   if (!needsRedraw_) return;
   needsRedraw_ = false;
 
   char defaultSlotPath[64];
   snprintf(defaultSlotPath, sizeof(defaultSlotPath), "%s/slot_%s.bin",
            inklink::SLOT_DIR, inklink::SLOT_NAMES[0]);
-  if (HalStorage::exists(defaultSlotPath)) {
+  if (currentSlot_ < 0 && HalStorage::exists(defaultSlotPath)) {
     currentSlot_ = 0;
-    displayFrameFromFile(renderer, defaultSlotPath);
+    displayFrameFromFile(defaultSlotPath);
     return;
   }
 
-  drawStatusScreen(renderer);
+  drawStatusScreen();
 }
 
 // ---- WS trampoline ---------------------------------------------------------
@@ -201,7 +213,7 @@ void InkLinkActivity::startReceiving(uint8_t num, const char* slot,
   Serial.printf("[InkLink] Recv start: slot=%s size=%u\n", pendingSlot_, size);
 }
 
-void InkLinkActivity::finishReceiving(GfxRenderer& renderer) {
+void InkLinkActivity::finishReceiving() {
   state_ = State::Idle;  // set early to prevent re-entry
 
   // Verify CRC32
@@ -213,13 +225,13 @@ void InkLinkActivity::finishReceiving(GfxRenderer& renderer) {
     return;
   }
 
-  // Promote tmp → slot file
+  // Promote tmp -> slot file
   HalStorage::remove(slotPath_);
   HalStorage::rename(tmpPath_, slotPath_);
 
   // Display
   state_ = State::Displaying;
-  displayFrameFromFile(renderer, slotPath_);
+  displayFrameFromFile(slotPath_);
   state_ = State::Idle;
 
   wsServer_->sendTXT(activeClient_, "{\"ok\":\"displayed\"}");
@@ -242,19 +254,12 @@ void InkLinkActivity::abortReceiving() {
 }
 
 // ---- Frame display ---------------------------------------------------------
-// File layout (written by NSImage+RawEink.swift on Mac):
+// File layout (written by RetroDisplayRenderer.swift on Mac):
 //   [0 .. BUFFER_SIZE-1]          = MSB plane (bit 1 of each pixel's 2-bit gray)
 //   [BUFFER_SIZE .. 2*BUFFER_SIZE-1] = LSB plane (bit 0)
 // BUFFER_SIZE = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT = 66 * 792 = 52272 bytes
-//
-// GfxRenderer grayscale pipeline:
-//   setRenderMode(GRAYSCALE_LSB)  → paint LSB data into frameBuffer
-//   copyGrayscaleLsbBuffers()     → frameBuffer → LSB plane in HalDisplay
-//   setRenderMode(GRAYSCALE_MSB)  → paint MSB data
-//   copyGrayscaleMsbBuffers()
-//   displayGrayBuffer()           → triggers EPD 4-gray waveform
 
-void InkLinkActivity::displayFrameFromFile(GfxRenderer& renderer, const char* path) {
+void InkLinkActivity::displayFrameFromFile(const char* path) {
   const uint32_t planeSize = HalDisplay::BUFFER_SIZE;
 
   if (!renderer.hasFrameBuffer()) {
@@ -305,7 +310,7 @@ void InkLinkActivity::displayFrameFromFile(GfxRenderer& renderer, const char* pa
   Serial.printf("[InkLink] Frame displayed: %s\n", path);
 }
 
-void InkLinkActivity::loadSlotByIndex(GfxRenderer& renderer, int index) {
+void InkLinkActivity::loadSlotByIndex(int index) {
   if (index < 0 || index >= inklink::SLOT_COUNT) return;
   char path[64];
   snprintf(path, sizeof(path), "%s/slot_%s.bin",
@@ -318,33 +323,32 @@ void InkLinkActivity::loadSlotByIndex(GfxRenderer& renderer, int index) {
 
   state_ = State::SlotLoading;
   currentSlot_ = index;
-  displayFrameFromFile(renderer, path);
+  displayFrameFromFile(path);
   state_ = State::Idle;
   needsRedraw_ = false;
 }
 
 // ---- Status screen ---------------------------------------------------------
 
-void InkLinkActivity::drawStatusScreen(GfxRenderer& renderer) {
+void InkLinkActivity::drawStatusScreen() {
   renderer.setRenderMode(GfxRenderer::BW);
   renderer.clearScreen();
 
-  const int sw = renderer.getDisplayWidth();
   const int sh = renderer.getDisplayHeight();
   const int cy = sh / 2;
 
   // Title
-  renderer.drawCenteredText(UI_14_FONT_ID, cy - 40, "InkLink");
+  renderer.drawCenteredText(UI_12_FONT_ID, cy - 40, "InkLink", true, EpdFontFamily::BOLD);
 
   // WebSocket URL
   char wsUrl[64];
   snprintf(wsUrl, sizeof(wsUrl), "ws://%s:%u",
            WiFi.localIP().toString().c_str(), inklink::WS_PORT);
-  renderer.drawCenteredText(UI_12_FONT_ID, cy, wsUrl);
+  renderer.drawCenteredText(UI_12_FONT_ID, cy, wsUrl, true);
 
   // Hint
-  renderer.drawCenteredText(UI_12_FONT_ID, cy + 30,
-                             "Waiting for ink-Macintosh…", false);
+  renderer.drawCenteredText(UI_10_FONT_ID, cy + 30,
+                            "Waiting for ink-Macintosh...", true);
 
   renderer.displayBuffer(HalDisplay::FULL_REFRESH);
 }

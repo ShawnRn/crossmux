@@ -20,15 +20,16 @@ static constexpr const char* SLOT_NAMES[SLOT_COUNT] = {"desk", "home", "brief", 
 
 }  // namespace inklink
 
-class InkLinkActivity : public Activity {
+class InkLinkActivity final : public Activity {
  public:
-  InkLinkActivity();
+  explicit InkLinkActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
   ~InkLinkActivity() override;
 
-  void onEnter(GfxRenderer& renderer, const ActivityContext& ctx) override;
-  void onExit(GfxRenderer& renderer) override;
-  void loop(GfxRenderer& renderer, const InputEvent& input) override;
-  void render(GfxRenderer& renderer) override;
+  void onEnter() override;
+  void onExit() override;
+  void loop() override;
+  void render(RenderLock&&) override;
+  bool preventAutoSleep() override { return true; }
 
  private:
   enum class State {
@@ -47,11 +48,11 @@ class InkLinkActivity : public Activity {
   void handleWsDisconnect(uint8_t num);
 
   void startReceiving(uint8_t num, const char* slot, uint32_t expectedSize, uint32_t expectedCrc);
-  void finishReceiving(GfxRenderer& renderer);
+  void finishReceiving();
   void abortReceiving();
-  void displayFrameFromFile(GfxRenderer& renderer, const char* path);
-  void loadSlotByIndex(GfxRenderer& renderer, int index);
-  void drawStatusScreen(GfxRenderer& renderer);
+  void displayFrameFromFile(const char* path);
+  void loadSlotByIndex(int index);
+  void drawStatusScreen();
 
   WebSocketsServer* wsServer_ = nullptr;
   State state_ = State::Idle;
