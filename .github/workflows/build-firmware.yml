@@ -54,3 +54,25 @@ jobs:
           name: crossmux-inklink-firmware
           path: dist/*
           retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/feature/inklink' || startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: v1.2.0-inklink
+          name: CrossMux InkLink Firmware for X3
+          body: |
+            ## CrossMux InkLink Firmware (X3 CN & Global)
+            
+            Built with 2-plane 4-grayscale silent WebSocket receiver for `ink-Macintosh`.
+            
+            ### Included files:
+            - `firmware-cn.bin`: Simplified Chinese standard firmware for X3 (with CJK font, WeChat Read, InkLink)
+            - `bootloader-cn.bin`: ESP32-C3 bootloader
+            - `partitions-cn.bin`: Partition table
+            - `firmware.bin`: Global standard firmware
+          files: |
+            dist/firmware-cn.bin
+            dist/bootloader-cn.bin
+            dist/partitions-cn.bin
+            dist/firmware.bin
