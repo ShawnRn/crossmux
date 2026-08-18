@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <HalStorage.h>
 #include <GfxRenderer.h>
+#include <Logging.h>
 #include <WiFi.h>
 #include <string.h>
 
@@ -26,7 +27,7 @@ static void mkCrc32Table() {
 
 static uint32_t crc32File(const char* path) {
   mkCrc32Table();
-  File f = HalStorage::open(path, FILE_READ);
+  File f = Storage.open(path, FILE_READ);
   if (!f) return 0;
   uint32_t crc = 0xFFFFFFFFu;
   uint8_t buf[512];
@@ -62,7 +63,7 @@ InkLinkActivity::~InkLinkActivity() {
 
 void InkLinkActivity::onEnter() {
   Activity::onEnter();
-  HalStorage::mkdirp(inklink::SLOT_DIR);
+  Storage.mkdirp(inklink::SLOT_DIR);
   snprintf(tmpPath_, sizeof(tmpPath_), "%s/_incoming.tmp", inklink::SLOT_DIR);
 
   if (!wsServer_) {
@@ -70,7 +71,7 @@ void InkLinkActivity::onEnter() {
     wsServer_->begin();
     wsServer_->onEvent(InkLinkActivity::onWsEvent);
     serverStarted_ = true;
-    Serial.printf("[InkLink] WS server started on :%u\n", inklink::WS_PORT);
+    LOG_INF("InkLink", "WS server started on :%u", inklink::WS_PORT);
   }
 
   state_ = State::Idle;
@@ -117,7 +118,7 @@ void InkLinkActivity::render(RenderLock&&) {
   char defaultSlotPath[64];
   snprintf(defaultSlotPath, sizeof(defaultSlotPath), "%s/slot_%s.bin",
            inklink::SLOT_DIR, inklink::SLOT_NAMES[0]);
-  if (currentSlot_ < 0 && HalStorage::exists(defaultSlotPath)) {
+  if (currentSlot_ < 0 && Storage.exists(defaultSlotPath)) {
     currentSlot_ = 0;
     displayFrameFromFile(defaultSlotPath);
     return;
@@ -132,7 +133,7 @@ void InkLinkActivity::onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, si
   if (!sInstance) return;
   switch (type) {
     case WStype_CONNECTED:
-      Serial.printf("[InkLink] Client %u connected\n", num);
+      LOG_INF("InkLink", "Client %u connected", num);
       break;
     case WStype_DISCONNECTED:
       sInstance->handleWsDisconnect(num);
@@ -174,7 +175,7 @@ void InkLinkActivity::handleWsText(uint8_t num, const uint8_t* payload, size_t l
 void InkLinkActivity::handleWsBinary(uint8_t num, const uint8_t* payload, size_t length) {
   if (state_ != State::Receiving || num != activeClient_) return;
 
-  File f = HalStorage::open(tmpPath_, FILE_APPEND);
+  File f = Storage.open(tmpPath_, FILE_APPEND);
   if (!f) {
     abortReceiving();
     wsServer_->sendTXT(num, "{\"error\":\"sd_write\"}");
@@ -208,9 +209,9 @@ void InkLinkActivity::startReceiving(uint8_t num, const char* slot,
            inklink::SLOT_DIR, pendingSlot_);
 
   // Truncate tmp file
-  HalStorage::remove(tmpPath_);
+  Storage.remove(tmpPath_);
   state_ = State::Receiving;
-  Serial.printf("[InkLink] Recv start: slot=%s size=%u\n", pendingSlot_, size);
+  LOG_INF("InkLink", "Recv start: slot=%s size=%u", pendingSlot_, size);
 }
 
 void InkLinkActivity::finishReceiving() {
@@ -219,15 +220,15 @@ void InkLinkActivity::finishReceiving() {
   // Verify CRC32
   uint32_t actual = crc32File(tmpPath_);
   if (pendingCrc_ != 0 && actual != pendingCrc_) {
-    Serial.printf("[InkLink] CRC mismatch: got=%08X want=%08X\n", actual, pendingCrc_);
+    LOG_ERR("InkLink", "CRC mismatch: got=%08X want=%08X", actual, pendingCrc_);
     wsServer_->sendTXT(activeClient_, "{\"error\":\"crc_mismatch\"}");
-    HalStorage::remove(tmpPath_);
+    Storage.remove(tmpPath_);
     return;
   }
 
   // Promote tmp -> slot file
-  HalStorage::remove(slotPath_);
-  HalStorage::rename(tmpPath_, slotPath_);
+  Storage.remove(slotPath_);
+  Storage.rename(tmpPath_, slotPath_);
 
   // Display
   state_ = State::Displaying;
@@ -246,7 +247,7 @@ void InkLinkActivity::finishReceiving() {
 
 void InkLinkActivity::abortReceiving() {
   if (state_ == State::Receiving || state_ == State::Verifying) {
-    HalStorage::remove(tmpPath_);
+    Storage.remove(tmpPath_);
     state_         = State::Idle;
     activeClient_  = 0xFF;
     receivedBytes_ = 0;
@@ -263,13 +264,13 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   const uint32_t planeSize = HalDisplay::BUFFER_SIZE;
 
   if (!renderer.hasFrameBuffer()) {
-    Serial.println("[InkLink] No frame buffer available");
+    LOG_ERR("InkLink", "No frame buffer available");
     return;
   }
 
-  File f = HalStorage::open(path, FILE_READ);
+  File f = Storage.open(path, FILE_READ);
   if (!f) {
-    Serial.printf("[InkLink] Cannot open %s\n", path);
+    LOG_ERR("InkLink", "Cannot open %s", path);
     return;
   }
 
@@ -282,7 +283,7 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   // Read LSB plane into frameBuffer
   size_t lsbRead = f.read(renderer.frameBuffer, planeSize);
   if (lsbRead != planeSize) {
-    Serial.printf("[InkLink] Short read LSB: %zu/%u\n", lsbRead, planeSize);
+    LOG_ERR("InkLink", "Short read LSB: %zu/%u", lsbRead, planeSize);
     f.close();
     renderer.setRenderMode(GfxRenderer::BW);
     renderer.cleanupGrayscaleWithFrameBuffer();
@@ -296,7 +297,7 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   size_t msbRead = f.read(renderer.frameBuffer, planeSize);
   f.close();
   if (msbRead != planeSize) {
-    Serial.printf("[InkLink] Short read MSB: %zu/%u\n", msbRead, planeSize);
+    LOG_ERR("InkLink", "Short read MSB: %zu/%u", msbRead, planeSize);
     renderer.setRenderMode(GfxRenderer::BW);
     renderer.cleanupGrayscaleWithFrameBuffer();
     return;
@@ -307,7 +308,7 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   renderer.setRenderMode(GfxRenderer::BW);
   renderer.displayGrayBuffer();
 
-  Serial.printf("[InkLink] Frame displayed: %s\n", path);
+  LOG_INF("InkLink", "Frame displayed: %s", path);
 }
 
 void InkLinkActivity::loadSlotByIndex(int index) {
@@ -316,8 +317,8 @@ void InkLinkActivity::loadSlotByIndex(int index) {
   snprintf(path, sizeof(path), "%s/slot_%s.bin",
            inklink::SLOT_DIR, inklink::SLOT_NAMES[index]);
 
-  if (!HalStorage::exists(path)) {
-    Serial.printf("[InkLink] Slot '%s' empty\n", inklink::SLOT_NAMES[index]);
+  if (!Storage.exists(path)) {
+    LOG_INF("InkLink", "Slot '%s' empty", inklink::SLOT_NAMES[index]);
     return;
   }
 
