@@ -27,12 +27,13 @@ static void mkCrc32Table() {
 
 static uint32_t crc32File(const char* path) {
   mkCrc32Table();
-  File f = Storage.open(path, FILE_READ);
+  HalFile f = Storage.open(path, O_RDONLY);
   if (!f) return 0;
   uint32_t crc = 0xFFFFFFFFu;
   uint8_t buf[512];
   while (f.available()) {
     int n = f.read(buf, sizeof(buf));
+    if (n <= 0) break;
     for (int i = 0; i < n; i++) crc = crc32Table[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
   }
   f.close();
@@ -63,7 +64,7 @@ InkLinkActivity::~InkLinkActivity() {
 
 void InkLinkActivity::onEnter() {
   Activity::onEnter();
-  Storage.mkdirp(inklink::SLOT_DIR);
+  Storage.mkdir(inklink::SLOT_DIR, true);
   snprintf(tmpPath_, sizeof(tmpPath_), "%s/_incoming.tmp", inklink::SLOT_DIR);
 
   if (!wsServer_) {
@@ -153,8 +154,9 @@ void InkLinkActivity::onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, si
 
 void InkLinkActivity::handleWsText(uint8_t num, const uint8_t* payload, size_t length) {
   // Expected: {"slot":"desk","size":104544,"crc32":3291864591}
-  StaticJsonDocument<256> doc;
-  if (deserializeJson(doc, payload, length)) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload, length);
+  if (err) {
     wsServer_->sendTXT(num, "{\"error\":\"bad_json\"}");
     return;
   }
@@ -175,7 +177,7 @@ void InkLinkActivity::handleWsText(uint8_t num, const uint8_t* payload, size_t l
 void InkLinkActivity::handleWsBinary(uint8_t num, const uint8_t* payload, size_t length) {
   if (state_ != State::Receiving || num != activeClient_) return;
 
-  File f = Storage.open(tmpPath_, FILE_APPEND);
+  HalFile f = Storage.open(tmpPath_, O_WRONLY | O_CREAT | O_APPEND);
   if (!f) {
     abortReceiving();
     wsServer_->sendTXT(num, "{\"error\":\"sd_write\"}");
@@ -268,7 +270,13 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
     return;
   }
 
-  File f = Storage.open(path, FILE_READ);
+  uint8_t* fb = renderer.getFrameBuffer();
+  if (!fb) {
+    LOG_ERR("InkLink", "Frame buffer pointer is null");
+    return;
+  }
+
+  HalFile f = Storage.open(path, O_RDONLY);
   if (!f) {
     LOG_ERR("InkLink", "Cannot open %s", path);
     return;
@@ -281,9 +289,9 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
   f.seek(planeSize);
   // Read LSB plane into frameBuffer
-  size_t lsbRead = f.read(renderer.frameBuffer, planeSize);
-  if (lsbRead != planeSize) {
-    LOG_ERR("InkLink", "Short read LSB: %zu/%u", lsbRead, planeSize);
+  int lsbRead = f.read(fb, planeSize);
+  if (lsbRead != static_cast<int>(planeSize)) {
+    LOG_ERR("InkLink", "Short read LSB: %d/%u", lsbRead, planeSize);
     f.close();
     renderer.setRenderMode(GfxRenderer::BW);
     renderer.cleanupGrayscaleWithFrameBuffer();
@@ -294,10 +302,10 @@ void InkLinkActivity::displayFrameFromFile(const char* path) {
   // --- MSB pass: rewind and read MSB plane ---
   renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
   f.seek(0);
-  size_t msbRead = f.read(renderer.frameBuffer, planeSize);
+  int msbRead = f.read(fb, planeSize);
   f.close();
-  if (msbRead != planeSize) {
-    LOG_ERR("InkLink", "Short read MSB: %zu/%u", msbRead, planeSize);
+  if (msbRead != static_cast<int>(planeSize)) {
+    LOG_ERR("InkLink", "Short read MSB: %d/%u", msbRead, planeSize);
     renderer.setRenderMode(GfxRenderer::BW);
     renderer.cleanupGrayscaleWithFrameBuffer();
     return;
